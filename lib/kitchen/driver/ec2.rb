@@ -24,6 +24,7 @@ require_relative "aws/client"
 require_relative "aws/instance_generator"
 require "aws-sdk-core/waiters/errors"
 require "ubuntu_ami"
+require "retryable"
 
 module Kitchen
 
@@ -194,7 +195,7 @@ module Kitchen
         end
         info("Instance <#{server.id}> requested.")
         ec2.client.wait_until(
-          :instance_running,
+          :instance_exists,
           :instance_ids => [server.id]
         )
         tag_server(server)
@@ -338,7 +339,12 @@ module Kitchen
         config[:tags].each do |k, v|
           tags << { :key => k, :value => v }
         end
-        server.create_tags(:tags => tags)
+        # Unfortunately the AWS SDK doesn't actually wait correctly for instance existence, so we
+        # need to retry if they throw a `server with id doesn't exist` error
+        Retryable.retryable(:tries => 10, :sleep => lambda { |n| [2**n, 10].min }) do |retries, _|
+          info "Attempting to tag the server, attempt #{retries}/10"
+          server.create_tags(:tags => tags)
+        end
       end
 
       def wait_until_ready(server, state)
