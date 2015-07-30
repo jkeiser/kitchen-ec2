@@ -194,11 +194,17 @@ module Kitchen
           server = submit_server
         end
         info("Instance <#{server.id}> requested.")
-        ec2.client.wait_until(
-          :instance_exists,
-          :instance_ids => [server.id]
-        )
-        tag_server(server)
+        # Unfortunately the AWS SDK doesn't actually wait correctly for instance existence, so we
+        # need to retry if they throw a `server with id doesn't exist` or `id does not exist` error
+        Retryable.retryable(:tries => 10, :sleep => lambda { |n| [2**n, 30].min }) do |r, _|
+          debug("Putting existence check in a retryable loop because it can fail, #{r} retries")
+          server.wait_until_exists do |w|
+            w.before_attempt do |attempts|
+              info("Polling AWS for existence, #{attempts} attempt...")
+            end
+          end
+          tag_server(server)
+        end
 
         state[:server_id] = server.id
         info("EC2 instance <#{state[:server_id]}> created.")
@@ -339,12 +345,7 @@ module Kitchen
         config[:tags].each do |k, v|
           tags << { :key => k, :value => v }
         end
-        # Unfortunately the AWS SDK doesn't actually wait correctly for instance existence, so we
-        # need to retry if they throw a `server with id doesn't exist` error
-        Retryable.retryable(:tries => 10, :sleep => lambda { |n| [2**n, 10].min }) do |retries, _|
-          info "Attempting to tag the server, attempt #{retries}/10"
-          server.create_tags(:tags => tags)
-        end
+        server.create_tags(:tags => tags)
       end
 
       def wait_until_ready(server, state)
