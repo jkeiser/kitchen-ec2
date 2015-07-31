@@ -196,19 +196,30 @@ module Kitchen
         info("Instance <#{server.id}> requested.")
         # Unfortunately the AWS SDK doesn't actually wait correctly for instance existence, so we
         # need to retry if they throw a `server with id doesn't exist` or `id does not exist` error
-        Retryable.retryable(:tries => 10, :sleep => lambda { |n| [2**n, 30].min }) do |r, _|
-          debug("Putting existence check in a retryable loop because it can fail, #{r} retries")
+        # Retryable.retryable(:tries => 10, :sleep => lambda { |n| [2**n, 30].min }) do |r, _|
+        #   debug("Putting existence check in a retryable loop because it can fail, #{r} retries")
+        # end
+
+        begin
           server.wait_until_exists do |w|
             w.before_attempt do |attempts|
               info("Polling AWS for existence, #{attempts} attempt...")
             end
           end
           tag_server(server)
-        end
 
-        state[:server_id] = server.id
-        info("EC2 instance <#{state[:server_id]}> created.")
-        wait_until_ready(server, state)
+          state[:server_id] = server.id
+          info("EC2 instance <#{state[:server_id]}> created.")
+          wait_until_ready(server, state)
+        rescue Aws::EC2::Errors::InvalidInstanceIDNotFound => notfound
+          error notfound.error.class.name
+          error notfound.error.message
+          raise
+        rescue Aws::Waiters::Errors::UnexpectedError => unexpected
+          error unexpected.error.class.name
+          error unexpected.error.message
+          raise
+        end
 
         if windows_os? &&
             instance.transport[:username] =~ /administrator/i &&
@@ -370,21 +381,6 @@ module Kitchen
         end
       end
 
-      # rubocop:disable Lint/UnusedBlockArgument
-      def fetch_windows_admin_password(server, state)
-        wait_with_destroy(server, state, "to fetch windows admin password") do |aws_instance|
-          enc = server.client.get_password_data(
-            :instance_id => state[:server_id]
-          ).password_data
-          # Password data is blank until password is available
-          !enc.nil? && !enc.empty?
-        end
-        pass = server.decrypt_windows_password(instance.transport[:ssh_key])
-        state[:password] = pass
-        info("Retrieved Windows password for instance <#{state[:server_id]}>.")
-      end
-      # rubocop:enable Lint/UnusedBlockArgument
-
       def wait_with_destroy(server, state, status_msg, &block)
         wait_log = proc do |attempts|
           c = attempts * config[:retryable_sleep]
@@ -405,6 +401,21 @@ module Kitchen
           raise
         end
       end
+
+      # rubocop:disable Lint/UnusedBlockArgument
+      def fetch_windows_admin_password(server, state)
+        wait_with_destroy(server, state, "to fetch windows admin password") do |aws_instance|
+          enc = server.client.get_password_data(
+            :instance_id => state[:server_id]
+          ).password_data
+          # Password data is blank until password is available
+          !enc.nil? && !enc.empty?
+        end
+        pass = server.decrypt_windows_password(instance.transport[:ssh_key])
+        state[:password] = pass
+        info("Retrieved Windows password for instance <#{state[:server_id]}>.")
+      end
+      # rubocop:enable Lint/UnusedBlockArgument
 
       def amis
         @amis ||= begin
